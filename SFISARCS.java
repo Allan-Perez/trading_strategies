@@ -1,5 +1,3 @@
-package com.dukascopy.visualforex.visualjforex;
-
 import java.util.*;
 import com.dukascopy.api.*;
 import java.text.SimpleDateFormat;
@@ -8,7 +6,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.lang.reflect.*;
 import java.math.BigDecimal;
 
-/* The name is an acronym of the indicators used:
+/* 
+ * The name is an acronym of the indicators used:
  * SF = Stochastic Fast
  * I = Ichimoku
  * SAR = parabolic SAR
@@ -142,7 +141,7 @@ public class SFISARCS implements IStrategy {
             OfferSide.BID);
         
         downloadIndicators();
-        subscriptionInstrumentCheck(Instrument.fromString("EUR/USD")); //////////IS THIS NECESARY? (TRY DELETE THIS ON TEST)
+        subscriptionInstrumentCheck(Instrument.fromString("EUR/USD"));
         console.getOut().println("Debug Started");
     }
 
@@ -281,8 +280,6 @@ public class SFISARCS implements IStrategy {
             strategy();
         }
     }
-
-    
 
     private boolean validBar(Instrument instrument, Period period){
         return (instrument != null && instrument.equals(defaultInstrument)) && 
