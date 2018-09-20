@@ -24,8 +24,7 @@ public class SFISARCS implements IStrategy {
     private IIndicators indicators;
     private IUserInterface userInterface;
 
-    @Configurable("defaultTakeProfit:")
-    public int defaultTakeProfit = 40;
+    public int defaultTakeProfit = 500;
     @Configurable("defaultInstrument:")
     public Instrument defaultInstrument = Instrument.EURUSD;
     @Configurable("defaultSlippage:")
@@ -57,12 +56,12 @@ public class SFISARCS implements IStrategy {
     private double _shifted_cci;
     private Period _cci_period = Period.ONE_HOUR;
     @Configurable("CCI time period: ")
-    public int _cci_time_period = 14; // {12,24,32,64}
+    public int _cci_time_period = 16; // {12,24,32,64}
     private int _cci_shift = 0;
     private int _cci_shifted_shift = 1;
 
     private double _sar;
-    private Period _sar_period = Period.DAILY;
+    private Period _sar_period = Period.FOUR_HOURS; // default: Period.DAILY
     private int _sar_shift = 0;
     private double _sar_acc = 0.02;
     private double _sar_max = 0.2;
@@ -96,9 +95,9 @@ public class SFISARCS implements IStrategy {
     private double _risk_per_trade = 2e3;
     private double _max_risk = 0.1;
     @Configurable("Max lot allowed: ")
-    public double _max_lot = 7.0; // [5,10]
+    public double _max_lot = 8.0; // [5,10]
     @Configurable("Trailing stop value")
-    public double _pips_trailing_stop = 10; // [5,20]
+    public double _pips_trailing_stop = 20; // [5,20]
     private boolean _trailed = false;
     private IOrder _last_position;
 
@@ -342,7 +341,7 @@ public class SFISARCS implements IStrategy {
         if (UseofLeverage > _use_of_leverage_threshold){
             CloseAllPositons();
         }
-        else if (_use_of_leverage_threshold > UseofLeverage)
+        else if (_use_of_leverage_threshold >= UseofLeverage)
             for (IOrder position : OpenPositions){
                 if(position.getState() == IOrder.State.OPENED||position.getState() == IOrder.State.FILLED)
                     _last_position = position;
