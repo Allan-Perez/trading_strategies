@@ -24,13 +24,13 @@ public class SFISARCS implements IStrategy {
     private IIndicators indicators;
     private IUserInterface userInterface;
 
-    public int defaultTakeProfit = 500;
+    public int defaultTakeProfit = 60;
     @Configurable("defaultInstrument:")
     public Instrument defaultInstrument = Instrument.EURUSD;
     @Configurable("defaultSlippage:")
     public int defaultSlippage = 5;
     @Configurable("defaultStopLoss:")
-    public int defaultStopLoss = 20;
+    public int defaultStopLoss = 30;
     @Configurable("defaultPeriod:")
     public Period defaultPeriod = Period.ONE_MIN;
 
@@ -56,12 +56,12 @@ public class SFISARCS implements IStrategy {
     private double _shifted_cci;
     private Period _cci_period = Period.ONE_HOUR;
     @Configurable("CCI time period: ")
-    public int _cci_time_period = 16; // {12,24,32,64}
+    public int _cci_time_period = 42; // {12,24,32,64}
     private int _cci_shift = 0;
     private int _cci_shifted_shift = 1;
 
     private double _sar;
-    private Period _sar_period = Period.FOUR_HOURS; // default: Period.DAILY
+    private Period _sar_period = Period.DAILY; // default: Period.DAILY
     private int _sar_shift = 0;
     private double _sar_acc = 0.02;
     private double _sar_max = 0.2;
@@ -85,19 +85,18 @@ public class SFISARCS implements IStrategy {
 
     //Custom variables
     @Configurable("Stochastic Bear Threshold: ")
-    public int _stochBearTreshold = 20; // [10,30]
+    public int _stochBearTreshold = 30; // [10,30]
     @Configurable("Stochastic Bull Threshold: ")
-    public int _stochBullTreshold = 80; // [70,90]
+    public int _stochBullTreshold = 55; // [70,90]
     private double _lot;    
     private double _use_of_leverage_threshold = 100 ;
-    @Configurable("PnL treshold for trail_stop activation: ")
-    public double _pnl_threshold = 10; // [5,20]
+    private double _pnl_threshold = 10; 
     private double _risk_per_trade = 2e3;
     private double _max_risk = 0.1;
     @Configurable("Max lot allowed: ")
-    public double _max_lot = 8.0; // [5,10]
-    @Configurable("Trailing stop value")
-    public double _pips_trailing_stop = 20; // [5,20]
+    public double _max_lot = 9.0; // [5,10]
+    @Configurable("Trailing step value")
+    public double _pips_trailing_step = 15; // [5,20]
     private boolean _trailed = false;
     private IOrder _last_position;
 
@@ -311,12 +310,10 @@ public class SFISARCS implements IStrategy {
 
     private void noPositionStrategy(){
         this._trailed = false;
-        if (LastBidCandle.getClose() < _sar && bearishEvent()){
-            console.getOut().println("No position strategy bearishEvent");
+        if (LastAskCandle.getClose() < _sar && bearishEvent()){
             MarketOrder("SELL");
         }
         else if(LastBidCandle.getClose() > _sar && bullishEvent()){
-            console.getOut().println("No position strategy bullishEvent");
             MarketOrder("BUY");
         }
     }
@@ -341,7 +338,7 @@ public class SFISARCS implements IStrategy {
         if (UseofLeverage > _use_of_leverage_threshold){
             CloseAllPositons();
         }
-        else if (_use_of_leverage_threshold >= UseofLeverage)
+        else if (_use_of_leverage_threshold > UseofLeverage)
             for (IOrder position : OpenPositions){
                 if(position.getState() == IOrder.State.OPENED||position.getState() == IOrder.State.FILLED)
                     _last_position = position;
@@ -357,6 +354,7 @@ public class SFISARCS implements IStrategy {
             (!order.isLong() && ichimokuCloseShortEvent())){
             this._last_position = order;
             ClosePosition();
+            console.getOut().println("Ichimoku protocol activated, closing position...");
         }
     }
 
@@ -380,6 +378,7 @@ public class SFISARCS implements IStrategy {
 
     private void cciProtocol(IOrder order){
         if (cciEvent(order)){
+            console.getOut().println("CCI Protocol activated, closing position...");
             this._last_position = order;
             ClosePosition();
         }
@@ -391,12 +390,60 @@ public class SFISARCS implements IStrategy {
             (!order.isLong() && (_cci > _shifted_cci || (_cci < _shifted_cci && _stoch_K > _stoch_D))); 
     }
 
-    private void CloseAllPositons(){
-        for (IOrder position : OpenPositions){
-            if (position.getState() == IOrder.State.OPENED ||
-                position.getState() == IOrder.State.FILLED)
-                _last_position = position;
-            ClosePosition();
+    private  void MarketOrder(String dir) {
+        ITick tick = getLastTick(defaultInstrument);
+
+        IEngine.OrderCommand command = (dir=="BUY") ? IEngine.OrderCommand.BUY :
+            IEngine.OrderCommand.SELL; 
+
+        double stopLoss =  (dir=="BUY") ? tick.getBid() - defaultInstrument.getPipValue() * defaultStopLoss : 
+                            tick.getBid() + defaultInstrument.getPipValue() * defaultStopLoss;
+        double takeProfit = (dir=="BUY") ? round(tick.getBid() + defaultInstrument.getPipValue() * defaultTakeProfit, defaultInstrument):
+                                round(tick.getBid() - defaultInstrument.getPipValue() * defaultTakeProfit, defaultInstrument);
+
+        console.getOut().println("new Market Order: stopLoss = "+String.valueOf(stopLoss)+" | takeProfit= "+String.valueOf(takeProfit));
+        try {
+           _last_position = context.getEngine().submitOrder(getLabel(), 
+                   defaultInstrument, command, _lot, 0, defaultSlippage,
+                   stopLoss, takeProfit, 0, "");
+        } catch (JFException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private  void updateTrailingStop(IOrder order) {
+        _pips_trailing_step = (_pips_trailing_step < 10) ? 10 : _pips_trailing_step;
+        if (_pips_trailing_step != order.getTrailingStep()) {
+            double stopLoss;
+            try {
+                if (order.isLong()) {
+                    stopLoss = round(order.getOpenPrice() - 
+                        order.getInstrument().getPipValue() * 
+                        defaultStopLoss, order.getInstrument());
+                    if ((stopLoss != order.getStopLossPrice()) && (stopLoss != 0)
+                        && (order.getState().equals(IOrder.State.OPENED) || 
+                            order.getState().equals(IOrder.State.FILLED))) 
+
+                        order.setStopLossPrice(stopLoss, OfferSide.BID, _pips_trailing_step);
+                    
+                } else if(!order.isLong()){
+                    stopLoss = round(order.getOpenPrice() + 
+                        order.getInstrument().getPipValue() * 
+                        defaultStopLoss, order.getInstrument());
+                    if ((stopLoss != order.getStopLossPrice()) && (stopLoss != 0)
+                        && (order.getState().equals(IOrder.State.OPENED) ||
+                            order.getState().equals(IOrder.State.FILLED))) 
+
+                        order.setStopLossPrice(stopLoss, OfferSide.ASK, _pips_trailing_step);
+                }
+                TradeEventAction event = new TradeEventAction();
+                event.setMessageType(IMessage.Type.ORDER_CHANGED_OK);
+                event.setPositionLabel(order.getLabel());
+                tradeEventActions.add(event);
+                console.getOut().println("new Stop loss (trailing updated): " + order.getStopLossPrice());
+            } catch (JFException e) {
+                e.printStackTrace();
+            }
         }
     }
 
@@ -409,6 +456,15 @@ public class SFISARCS implements IStrategy {
             
         } catch (JFException e)  {
             e.printStackTrace();
+        }
+    }
+
+    private void CloseAllPositons(){
+        for (IOrder position : OpenPositions){
+            if (position.getState() == IOrder.State.OPENED ||
+                position.getState() == IOrder.State.FILLED)
+                _last_position = position;
+            ClosePosition();
         }
     }
 
@@ -668,65 +724,7 @@ public class SFISARCS implements IStrategy {
             this._senkouA_shifted = Double.NaN;
             this._senkouB_shifted = Double.NaN;
         }
-    }    
-
-    private  void MarketOrder(String dir) {
-        ITick tick = getLastTick(defaultInstrument);
-
-        IEngine.OrderCommand command = (dir=="BUY") ? IEngine.OrderCommand.BUY :
-            IEngine.OrderCommand.SELL; 
-
-        double stopLoss =  (dir=="BUY") ? tick.getBid() - defaultInstrument.getPipValue() * defaultStopLoss : 
-                            tick.getBid() + defaultInstrument.getPipValue() * defaultStopLoss;
-        double takeProfit = (dir=="BUY") ? round(tick.getBid() + defaultInstrument.getPipValue() * defaultTakeProfit, defaultInstrument):
-                                round(tick.getBid() - defaultInstrument.getPipValue() * defaultTakeProfit, defaultInstrument);
-
-        console.getOut().println("MarketOrder stopLoss: "+String.valueOf(stopLoss)+" | takeProfit: "+String.valueOf(takeProfit));
-        try {
-           _last_position = context.getEngine().submitOrder(getLabel(), 
-                   defaultInstrument, command, _lot, 0, defaultSlippage,
-                   stopLoss, takeProfit, 0, "");
-        } catch (JFException e) {
-            e.printStackTrace();
-        }
-    }
-
-    private  void updateTrailingStop(IOrder order) {
-        _pips_trailing_stop = (_pips_trailing_stop < 10) ? 10 : _pips_trailing_stop;
-        console.getOut().println("_pips_trailing_stop: " + String.valueOf(_pips_trailing_stop)+
-            "order_trailing_step: "+String.valueOf(order.getTrailingStep()));
-        if (_pips_trailing_stop != order.getTrailingStep()) {
-            double stopLoss;
-            try {
-                if (order.isLong()) {
-                    stopLoss = round(order.getOpenPrice() - 
-                        order.getInstrument().getPipValue() * 
-                        defaultStopLoss, order.getInstrument());
-                    if ((stopLoss != order.getStopLossPrice()) && (stopLoss != 0)
-                        && (order.getState().equals(IOrder.State.OPENED) || 
-                            order.getState().equals(IOrder.State.FILLED))) 
-
-                        order.setStopLossPrice(stopLoss, OfferSide.BID, _pips_trailing_stop);
-                    
-                } else if(!order.isLong()){
-                    stopLoss = round(order.getOpenPrice() + 
-                        order.getInstrument().getPipValue() * 
-                        defaultStopLoss, order.getInstrument());
-                    if ((stopLoss != order.getStopLossPrice()) && (stopLoss != 0)
-                        && (order.getState().equals(IOrder.State.OPENED) ||
-                            order.getState().equals(IOrder.State.FILLED))) 
-
-                        order.setStopLossPrice(stopLoss, OfferSide.ASK, _pips_trailing_stop);
-                }
-                TradeEventAction event = new TradeEventAction();
-                event.setMessageType(IMessage.Type.ORDER_CHANGED_OK);
-                event.setPositionLabel(order.getLabel());
-                tradeEventActions.add(event);
-            } catch (JFException e) {
-                e.printStackTrace();
-            }
-        }
-    }    
+    }        
 
     class Candle  {
 
