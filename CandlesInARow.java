@@ -5,6 +5,7 @@ import java.util.Calendar;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.lang.reflect.*;
 import java.math.BigDecimal;
+import java.time.Period;
 
 
 public class CandlesInARow implements IStrategy{
@@ -19,15 +20,16 @@ public class CandlesInARow implements IStrategy{
     private IUserInterface userInterface;
 
     // Parameter template parameters
-    public int defaultTakeProfit = (int)5e4; 
+    @Configurable("Take profit: ")
+    public int defaultTakeProfit = 50; // 70 goes well
     @Configurable("defaultInstrument:")
     public Instrument defaultInstrument = Instrument.EURUSD;
     @Configurable("defaultSlippage:")
     public int defaultSlippage = 5;
     @Configurable("defaultStopLoss:")
-    public int defaultStopLoss = 10;
+    public int defaultStopLoss = 30; // 30 goes well
     @Configurable("defaultPeriod:")
-    public Period defaultPeriod = Period.ONE_MIN;
+    public com.dukascopy.api.Period defaultPeriod = com.dukascopy.api.Period.THIRTY_MINS;
 
     //Account stuff
     private String AccountId = "";
@@ -46,8 +48,29 @@ public class CandlesInARow implements IStrategy{
     private List<IOrder> OpenPositions = null;
     private List<IOrder> PendingPositions = null;
 
+    //Indicator
+    private double _sar;
+    @Configurable("Period SAR: ")
+    public com.dukascopy.api.Period _sar_period = com.dukascopy.api.Period.FOUR_HOURS;
+    private int _sar_shift = 0;
+    @Configurable("SAR ACC: ")
+    public double _sar_acc = 0.02;
+    @Configurable("SAR MAX: ")
+    public double _sar_max = 0.2;
+    
+    private double _hma;
+    @Configurable("HMA Time Period: ")
+    public int _hma_time_period = 6;
+    @Configurable("HMA Period")
+    public com.dukascopy.api.Period _hma_period = com.dukascopy.api.Period.FOUR_HOURS;
+    private int _hma_shift = 0;
+    
+
+    private double _hma_t1;
+    private double _sar_t1;
+
     // Strategy parameters
-    private int _nGreenCR = 0; 
+    private int _nGreenCR = 0;
     private int _nRedCR = 0;
     @Configurable("Candles threshold: ")
     public int _nCandles = 4;
@@ -57,7 +80,7 @@ public class CandlesInARow implements IStrategy{
     public double _pips_trailing_step = 10; // [5,20]
     private double _lot;
     @Configurable("Maximum lot permitted:")
-    public double _max_lot = 10.0; 
+    public double _max_lot = 8.0; 
     private double _max_risk = 0.1;
     private double _risk_per_trade = 2e3;
 
@@ -79,6 +102,9 @@ public class CandlesInARow implements IStrategy{
             OfferSide.ASK);
         LastBidCandle = new Candle(bidBar, defaultPeriod, defaultInstrument, 
             OfferSide.BID);
+
+        if (indicators.getIndicator("SAR") == null) 
+                indicators.registerDownloadableIndicator("1291","SAR");
     }
 
     public void onAccount(IAccount account) throws JFException {
@@ -132,13 +158,14 @@ public class CandlesInARow implements IStrategy{
         updateVariables(instrument);
     }
 
-    public void onBar(Instrument instrument, Period period, 
+    public void onBar(Instrument instrument, com.dukascopy.api.Period period, 
         IBar askBar, IBar bidBar) throws JFException {
 
         LastAskCandle = new Candle(askBar, period, instrument, OfferSide.ASK);
         LastBidCandle = new Candle(bidBar, period, instrument, OfferSide.BID);
         updateVariables(instrument);
         if(validBar(instrument, period)){
+            createIndicators();
             strategy();
         }
     }
@@ -187,7 +214,7 @@ public class CandlesInARow implements IStrategy{
         }
     }
 
-    private boolean validBar(Instrument instrument, Period period){
+    private boolean validBar(Instrument instrument, com.dukascopy.api.Period period){
         return (instrument != null && instrument.equals(defaultInstrument)) &&
             (period != null && period.equals(defaultPeriod));
     }
@@ -198,6 +225,9 @@ public class CandlesInARow implements IStrategy{
             updateTrailingStop(_last_position);
         else 
             checkOperationChance();
+
+        _hma_t1 = _hma;
+        _sar_t1 = _sar;
     }
 
     private void updateCandlesCount(){
@@ -220,10 +250,14 @@ public class CandlesInARow implements IStrategy{
     }
 
     private void checkOperationChance(){
-        if(bullishEvent()){
+        double diff_hma_sar = _sar - _hma;
+        double diff_hma_sar_t1 = _sar_t1 - _hma_t1;
+        if(bullishEvent() && LastBidCandle.getClose() > _sar && 
+            diff_hma_sar < diff_hma_sar_t1){
             MarketOrder("BUY");
         }
-        else if(bearishEvent()){
+        else if(bearishEvent() && LastAskCandle.getClose() < _sar && 
+            diff_hma_sar > diff_hma_sar_t1){
             MarketOrder("SELL");
         }
     }
@@ -273,26 +307,19 @@ public class CandlesInARow implements IStrategy{
         if (_pips_trailing_step != order.getTrailingStep()) {
             double stopLoss;
             try {
-                if (order.isLong()) {
-                    stopLoss = round(order.getOpenPrice() - 
-                        order.getInstrument().getPipValue() * 
-                        defaultStopLoss, order.getInstrument());
-                    if ((stopLoss != order.getStopLossPrice()) && (stopLoss != 0)
-                        && (order.getState().equals(IOrder.State.OPENED) || 
-                            order.getState().equals(IOrder.State.FILLED))) 
+                
+                stopLoss =  (order.isLong()) ? 
+                round(order.getOpenPrice() - order.getInstrument().getPipValue() * defaultStopLoss, order.getInstrument()): 
+                round(order.getOpenPrice() + order.getInstrument().getPipValue() * defaultStopLoss, order.getInstrument());
+                
+                if ((stopLoss != order.getStopLossPrice()) && (stopLoss != 0)
+                    && (order.getState().equals(IOrder.State.OPENED) ||
+                        order.getState().equals(IOrder.State.FILLED))) 
 
-                        order.setStopLossPrice(stopLoss, OfferSide.BID, _pips_trailing_step);
-                    
-                } else if(!order.isLong()){
-                    stopLoss = round(order.getOpenPrice() + 
-                        order.getInstrument().getPipValue() * 
-                        defaultStopLoss, order.getInstrument());
-                    if ((stopLoss != order.getStopLossPrice()) && (stopLoss != 0)
-                        && (order.getState().equals(IOrder.State.OPENED) ||
-                            order.getState().equals(IOrder.State.FILLED))) 
+                    order.setStopLossPrice(stopLoss, OfferSide.BID, _pips_trailing_step);
+                
+                console.getOut().println("Updated stop loss with t_step: " + _pips_trailing_step);
 
-                        order.setStopLossPrice(stopLoss, OfferSide.ASK, _pips_trailing_step);
-                }
                 TradeEventAction event = new TradeEventAction();
                 event.setMessageType(IMessage.Type.ORDER_CHANGED_OK);
                 event.setPositionLabel(order.getLabel());
@@ -301,27 +328,136 @@ public class CandlesInARow implements IStrategy{
                 e.printStackTrace();
             }
         }
+
+        CheckFreakingTime(order);
+        
+    }
+
+    private void CheckFreakingTime(IOrder order){
+        Date cT = new Date(order.getCreationTime());
+        Calendar creationTime = Calendar.getInstance();
+        creationTime.setTime(cT);
+        Calendar nowTime = Calendar.getInstance();
+        nowTime.setTime(new Date(LastTick.getTime()));
+        
+        java.time.LocalDateTime creationDateTime = java.time.LocalDateTime.of(
+            creationTime.get(Calendar.YEAR),
+            creationTime.get(Calendar.MONTH),
+            creationTime.get(Calendar.DAY_OF_MONTH),
+            creationTime.get(Calendar.HOUR_OF_DAY),
+            creationTime.get(Calendar.MINUTE)
+            );
+
+        java.time.LocalDateTime nowDateTime = java.time.LocalDateTime.of(
+            nowTime.get(Calendar.YEAR),
+            nowTime.get(Calendar.MONTH),
+            nowTime.get(Calendar.DAY_OF_MONTH),
+            nowTime.get(Calendar.HOUR_OF_DAY),
+            nowTime.get(Calendar.MINUTE)
+            );
+
+        java.time.LocalDateTime diffDateTime = java.time.LocalDateTime.from( creationDateTime );
+        long hoursDiff = diffDateTime.until(nowDateTime, java.time.temporal.ChronoUnit.HOURS);
+
+        if(hoursDiff >= 24){
+            this._last_position = order;
+            ClosePosition();
+        }
+    }
+
+    private void CloseAllPositons(){
+        for (IOrder position : OpenPositions){
+            if (position.getState() == IOrder.State.OPENED ||
+                position.getState() == IOrder.State.FILLED)
+                _last_position = position;
+            ClosePosition();
+        }
+    }
+
+    private void ClosePosition(){
+        try {
+            if (_last_position != null && (_last_position.getState() == IOrder.State.OPENED ||
+                _last_position.getState() == IOrder.State.FILLED))
+                
+                _last_position.close();
+            
+        } catch (JFException e)  {
+            e.printStackTrace();
+        }
+    }
+
+    private void createIndicators(){
+        createSAR();
+        createHMA();
+    }
+
+    private void createSAR() {
+        OfferSide[] offerside = new OfferSide[1];
+        IIndicators.AppliedPrice[] appliedPrice = new IIndicators.AppliedPrice[1];
+        offerside[0] = OfferSide.BID;
+        appliedPrice[0] = IIndicators.AppliedPrice.CLOSE;
+        Object[] params = new Object[2];
+        params[0] = _sar_acc;
+        params[1] = _sar_max;
+        try {
+            subscriptionInstrumentCheck(defaultInstrument);
+            long time = context.getHistory().getBar(defaultInstrument, _sar_period, OfferSide.BID, _sar_shift).getTime();
+            Object[] indicatorResult = context.getIndicators().calculateIndicator(defaultInstrument, _sar_period, offerside,
+                    "SAR", appliedPrice, params, Filter.WEEKENDS, 1, time, 0);
+            if ((new Double(((double [])indicatorResult[0])[0])) == null) 
+                this._sar = Double.NaN;
+            else 
+                this._sar = (((double [])indicatorResult[0])[0]);
+        } catch (JFException e) {
+            e.printStackTrace();
+            console.getErr().println(e);
+            this._sar = Double.NaN;
+        }
+    }
+
+    private void createHMA(){
+        OfferSide[] offerside = new OfferSide[1];
+        IIndicators.AppliedPrice[] appliedPrice = new IIndicators.AppliedPrice[1];
+        offerside[0] = OfferSide.BID;
+        appliedPrice[0] = IIndicators.AppliedPrice.CLOSE;
+        Object[] params = new Object[1];
+        params[0] = _hma_time_period;
+        try {
+            subscriptionInstrumentCheck(defaultInstrument);
+            long time = context.getHistory().getBar(defaultInstrument, _hma_period, OfferSide.BID, _hma_shift).getTime();
+            Object[] indicatorResult = context.getIndicators().calculateIndicator(defaultInstrument, _hma_period, offerside,
+                    "HMA", appliedPrice, params, Filter.WEEKENDS, 1, time, 0);
+            if ((new Double(((double [])indicatorResult[0])[0])) == null) {
+                this._hma = Double.NaN;
+            } else { 
+                this._hma = (((double [])indicatorResult[0])[0]);
+            } 
+        } catch (JFException e) {
+            e.printStackTrace();
+            console.getErr().println(e);
+            this._hma = Double.NaN;
+        }
     }
 
     class Candle  {
 
         IBar bar;
-        Period period;
+        com.dukascopy.api.Period period;
         Instrument instrument;
         OfferSide offerSide;
 
-        public Candle(IBar bar, Period period, Instrument instrument, OfferSide offerSide) {
+        public Candle(IBar bar, com.dukascopy.api.Period period, Instrument instrument, OfferSide offerSide) {
             this.bar = bar;
             this.period = period;
             this.instrument = instrument;
             this.offerSide = offerSide;
         }
 
-        public Period getPeriod() {
+        public com.dukascopy.api.Period getPeriod() {
             return period;
         }
 
-        public void setPeriod(Period period) {
+        public void setPeriod(com.dukascopy.api.Period period) {
             this.period = period;
         }
 
