@@ -68,7 +68,7 @@ public class CandlesInARow implements IStrategy{
 
     private double _hma_t1;
     private double _sar_t1;
-
+    
     // Strategy parameters
     private int _nGreenCR = 0;
     private int _nRedCR = 0;
