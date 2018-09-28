@@ -27,15 +27,17 @@ public class MACDA2 implements IStrategy {
 
     // Parameter template parameters
     @Configurable("Take profit: ")
-    public int defaultTakeProfit = 50; 
+    public int defaultTakeProfit = 70; 
     @Configurable("defaultInstrument:")
     public Instrument defaultInstrument = Instrument.EURUSD;
     @Configurable("defaultSlippage:")
     public int defaultSlippage = 5;
     @Configurable("defaultStopLoss:")
-    public int defaultStopLoss = 30; 
+    public int defaultStopLoss = 250; 
     @Configurable("defaultPeriod:")
-    public com.dukascopy.api.Period defaultPeriod = com.dukascopy.api.Period.THIRTY_MINS;
+    public com.dukascopy.api.Period defaultPeriod = com.dukascopy.api.Period.FIVE_MINS;
+    @Configurable("dynamicTakeProfit")
+    public int dynamicTakeProfit = 15;
 
     //Account stuff
     private String AccountId = "";
@@ -84,8 +86,9 @@ public class MACDA2 implements IStrategy {
     private boolean _trailed = false;
     private IOrder _last_position;
     private double _max_risk = 0.1;
-    private double _risk_per_trade = 2e3;
+    private double _risk_per_trade = 3e3;
     public double _max_lot = 7;
+    @Configurable("Trailing Step: ")
     public int _pips_trailing_step = 10;
 
 
@@ -268,13 +271,6 @@ public class MACDA2 implements IStrategy {
         }
     }
 
-    private void manageOrderStrategy(){
-        if(!_trailed){
-            updateTrailing(_last_position);
-            _trailed = true;
-        }
-    }
-
     private boolean bullishEvent(){
 
         return _atr > _shifted_atr && _macdh > 0 && LastBidCandle.getClose() > _sar;
@@ -283,6 +279,141 @@ public class MACDA2 implements IStrategy {
     private boolean bearishEvent(){
 
         return _atr > _shifted_atr && _macdh < 0 && LastBidCandle.getClose() < _sar;
+    }
+
+    private void manageOrderStrategy(){
+        if(!_trailed){
+            updateTrailingCheck(_last_position);
+        }
+        CheckFreakingTime(_last_position);
+        
+        Calendar cal = Calendar.getInstance();
+        Date lastDate = new Date(LastTick.getTime());
+        cal.setTime(lastDate);
+        if (cal.get(Calendar.DAY_OF_WEEK) == Calendar.FRIDAY &&
+            cal.get(Calendar.HOUR_OF_DAY) > 17)
+            CloseAllPositons();
+    }
+
+    private void updateTrailingCheck(IOrder order){
+        double takeProfitTreshold = (order.isLong()) ? 
+                round(order.getOpenPrice() + order.getInstrument().getPipValue() * dynamicTakeProfit, order.getInstrument()): 
+                round(order.getOpenPrice() - order.getInstrument().getPipValue() * dynamicTakeProfit, order.getInstrument());
+        
+        if((order.isLong() && (LastTick.getBid() > takeProfitTreshold)) ||
+            (!order.isLong() && (LastTick.getAsk() < takeProfitTreshold)) ){
+            updateTrailing(order);
+        }
+    }
+
+    private void moneyManagement() {
+        _lot = Equity * _max_risk/_risk_per_trade;
+        _lot = (_lot > _max_lot) ? _max_lot : _lot; 
+    }
+
+    private  void openAtMarket(String dir) {
+        moneyManagement();
+        ITick tick = getLastTick(defaultInstrument);
+
+        IEngine.OrderCommand command = (dir=="BUY") ? IEngine.OrderCommand.BUY :
+            IEngine.OrderCommand.SELL; 
+
+        double stopLoss =  (dir=="BUY") ? tick.getBid() - 
+            defaultInstrument.getPipValue() * defaultStopLoss : tick.getBid() + 
+            defaultInstrument.getPipValue() * defaultStopLoss;
+        double takeProfit = (dir=="BUY") ? round(tick.getBid() + 
+            defaultInstrument.getPipValue() * defaultTakeProfit, defaultInstrument):
+            round(tick.getBid() - defaultInstrument.getPipValue() * 
+                defaultTakeProfit, defaultInstrument);
+        try {
+            _last_position = context.getEngine().submitOrder(getLabel(), 
+                defaultInstrument, command, _lot, 0, defaultSlippage,
+                stopLoss, takeProfit, 0, "");
+        } catch (JFException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void updateTrailing(IOrder order){
+        _pips_trailing_step = (_pips_trailing_step < 10) ? 10 : _pips_trailing_step;
+        if (_pips_trailing_step != order.getTrailingStep()) {
+            double stopLoss;
+            try {
+                stopLoss = (order.isLong()) ? 
+                round(order.getOpenPrice() + order.getInstrument().getPipValue() * dynamicTakeProfit/3, order.getInstrument()): 
+                round(order.getOpenPrice() - order.getInstrument().getPipValue() * dynamicTakeProfit/3, order.getInstrument());;
+                console.getOut().println("Trailing stop setting: "+stopLoss);
+                if ((stopLoss != order.getStopLossPrice()) && (stopLoss != 0)
+                    && (order.getState().equals(IOrder.State.OPENED) ||
+                        order.getState().equals(IOrder.State.FILLED))) {
+
+                    order.setStopLossPrice(stopLoss, OfferSide.BID, _pips_trailing_step);
+                    this._trailed = true;
+                }
+
+                TradeEventAction event = new TradeEventAction();
+                event.setMessageType(IMessage.Type.ORDER_CHANGED_OK);
+                event.setPositionLabel(order.getLabel());
+                tradeEventActions.add(event);
+                
+            } catch (JFException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private void CheckFreakingTime(IOrder order){
+        Date cT = new Date(order.getCreationTime());
+        Calendar creationTime = Calendar.getInstance();
+        creationTime.setTime(cT);
+        Calendar nowTime = Calendar.getInstance();
+        nowTime.setTime(new Date(LastTick.getTime()));
+        
+        java.time.LocalDateTime creationDateTime = java.time.LocalDateTime.of(
+            creationTime.get(Calendar.YEAR),
+            creationTime.get(Calendar.MONTH),
+            creationTime.get(Calendar.DAY_OF_MONTH),
+            creationTime.get(Calendar.HOUR_OF_DAY),
+            creationTime.get(Calendar.MINUTE)
+            );
+
+        java.time.LocalDateTime nowDateTime = java.time.LocalDateTime.of(
+            nowTime.get(Calendar.YEAR),
+            nowTime.get(Calendar.MONTH),
+            nowTime.get(Calendar.DAY_OF_MONTH),
+            nowTime.get(Calendar.HOUR_OF_DAY),
+            nowTime.get(Calendar.MINUTE)
+            );
+
+        java.time.LocalDateTime diffDateTime = java.time.LocalDateTime.from( creationDateTime );
+        long hoursDiff = diffDateTime.until(nowDateTime, java.time.temporal.ChronoUnit.HOURS);
+        console.getOut().println("Hours open operation: " + hoursDiff);
+        if(hoursDiff >= 24){
+            this._last_position = order;
+            ClosePosition();
+        }
+    }
+
+    private void CloseAllPositons(){
+        for (IOrder position : OpenPositions){
+            if (position.getState() == IOrder.State.OPENED ||
+                position.getState() == IOrder.State.FILLED)
+                _last_position = position;
+            ClosePosition();
+        }
+    }
+
+    private void ClosePosition(){
+        try {
+            console.getOut().println("Closing position...");
+            if (_last_position != null && (_last_position.getState() == IOrder.State.OPENED ||
+                _last_position.getState() == IOrder.State.FILLED))
+                
+                _last_position.close();
+            
+        } catch (JFException e)  {
+            e.printStackTrace();
+        }
     }
 
     private void createIndicators(){
@@ -391,63 +522,6 @@ public class MACDA2 implements IStrategy {
             e.printStackTrace();
             console.getErr().println(e);
             this._sar = Double.NaN;
-        }
-    }
-
-    private void moneyManagement() {
-        _lot = Equity * _max_risk/_risk_per_trade;
-        _lot = (_lot > _max_lot) ? _max_lot : _lot; 
-    }
-
-    private  void openAtMarket(String dir) {
-        moneyManagement();
-        ITick tick = getLastTick(defaultInstrument);
-
-        IEngine.OrderCommand command = (dir=="BUY") ? IEngine.OrderCommand.BUY :
-            IEngine.OrderCommand.SELL; 
-
-        double stopLoss =  (dir=="BUY") ? tick.getBid() - 
-            defaultInstrument.getPipValue() * defaultStopLoss : tick.getBid() + 
-            defaultInstrument.getPipValue() * defaultStopLoss;
-        double takeProfit = (dir=="BUY") ? round(tick.getBid() + 
-            defaultInstrument.getPipValue() * defaultTakeProfit, defaultInstrument):
-            round(tick.getBid() - defaultInstrument.getPipValue() * 
-                defaultTakeProfit, defaultInstrument);
-        try {
-            _last_position = context.getEngine().submitOrder(getLabel(), 
-                defaultInstrument, command, _lot, 0, defaultSlippage,
-                stopLoss, takeProfit, 0, "");
-        } catch (JFException e) {
-            e.printStackTrace();
-        }
-    }
-
-    private void updateTrailing(IOrder order){
-        _pips_trailing_step = (_pips_trailing_step < 10) ? 10 : _pips_trailing_step;
-        if (_pips_trailing_step != order.getTrailingStep()) {
-            double stopLoss;
-            try {
-                
-                stopLoss =  (order.isLong()) ? 
-                round(order.getOpenPrice() - order.getInstrument().getPipValue() * defaultStopLoss, order.getInstrument()): 
-                round(order.getOpenPrice() + order.getInstrument().getPipValue() * (defaultStopLoss+1), order.getInstrument());
-                console.getOut().println("Condition for trailing: " + stopLoss + " != " + order.getStopLossPrice());
-
-                if ((stopLoss != order.getStopLossPrice()) && (stopLoss != 0)
-                    && (order.getState().equals(IOrder.State.OPENED) ||
-                        order.getState().equals(IOrder.State.FILLED))) {
-
-                    order.setStopLossPrice(stopLoss, OfferSide.BID, _pips_trailing_step);
-                    console.getOut().println("Order actually trailed is long: " + order.getOrderCommand().isLong());
-                }
-
-                TradeEventAction event = new TradeEventAction();
-                event.setMessageType(IMessage.Type.ORDER_CHANGED_OK);
-                event.setPositionLabel(order.getLabel());
-                tradeEventActions.add(event);
-            } catch (JFException e) {
-                e.printStackTrace();
-            }
         }
     }
 
